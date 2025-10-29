@@ -1,7 +1,7 @@
 import cryptoHash from "crypto"
 import User from "../models/user.model.js"
 import { regValidator } from "../validators/auth.js"
-import { generateToken } from "../utils/generatetoken.js"
+import generateToken from "../utils/generatetoken.js"
 
 function hashValue (value) {
     const hash = cryptoHash.createHash('sha256')
@@ -67,7 +67,7 @@ export const signin = async (req, res)=> {
 
         const accessToken = generateToken(user._id, res)
          res.status(200).json({message: "LOGIN SUCCESSFUL", accessToken})
-         console.log("Login successful" ,user);
+         console.log("Login successful" ,accessToken);
     } catch (error) {
         res.status(500)
         console.log("error", error);
