@@ -7,7 +7,7 @@ import {
     setAuthCookies,
     clearAuthCookies,
     verifyRefreshToken
-} from '../utils/tokenManager.js';
+} from '../utils/generatetoken.js';
 
 export const signup = async (req, res) => {
     try {
