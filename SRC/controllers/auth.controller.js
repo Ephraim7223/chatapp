@@ -1,75 +1,205 @@
-import cryptoHash from "crypto"
-import User from "../models/user.model.js"
-import { regValidator } from "../validators/auth.js"
-import generateToken from "../utils/generatetoken.js"
+import User from '../models/user.model.js';
+import { regValidator, loginValidator } from '../validators/auth.js';
+import { hashPassword, comparePassword, needsRehash } from '../utils/passwordManager.js';
+import { 
+    generateAccessToken, 
+    generateRefreshToken, 
+    setAuthCookies,
+    clearAuthCookies,
+    verifyRefreshToken
+} from '../utils/tokenManager.js';
 
-function hashValue (value) {
-    const hash = cryptoHash.createHash('sha256')
-    hash.update(value)
-    return hash.digest('hex')
-}
-
-function comparePasswords (inputpass, hashedPass) {
-    return hashValue(inputpass) === hashedPass
-}
-
-export const signup = async (req, res)=> {
-    const registerResults = regValidator.safeParse(req.body)
-    if (!registerResults.success) {
-        res.status(400).json((registerResults.error.issues))
-    }
+export const signup = async (req, res) => {
     try {
-        const {userName, email, phoneNumber} = req.body
-        const {password, firstName, lastName ,DOB, gender } = req.body
-
-        const existingUser = await User.findOne( {$or :[{userName}, {email}, {phoneNumber}]})
-        if (existingUser) {
-            return res.status(409).send({message: 'User already exists', existingUser})
+        const validationResult = regValidator.safeParse(req.body);
+        if (!validationResult.success) {
+            return res.status(400).json({
+                success: false,
+                message: 'Validation failed',
+                errors: validationResult.error.issues
+            });
         }
 
-        const encryption = hashValue(password)
+        const { userName, email, phoneNumber, password, firstName, lastName, DOB, gender } = req.body;
+
+        const existingUser = await User.findOne({
+            $or: [{ userName }, { email }, { phoneNumber }]
+        }).select('userName email phoneNumber');
+
+        if (existingUser) {
+            const field = existingUser.userName === userName ? 'username' :
+                         existingUser.email === email ? 'email' : 'phone number';
+            return res.status(409).json({
+                success: false,
+                message: `User with this ${field} already exists`
+            });
+        }
+
+        const hashedPassword = await hashPassword(password);
 
         const newUser = new User({
             userName,
             email,
-            password: encryption,
+            password: hashedPassword,
             firstName,
-            phoneNumber,
             lastName,
+            phoneNumber,
             DOB,
             gender
-        })
+        });
 
-        await newUser.save()
-        res.status(201).json({message: 'User created succesfully', newUser})
-        console.log('User created succesfully');   
+        await newUser.save();
+
+        const accessToken = generateAccessToken(newUser._id);
+        const refreshToken = generateRefreshToken(newUser._id);
+
+        setAuthCookies(res, accessToken, refreshToken);
+
+        const userResponse = newUser.toObject();
+        delete userResponse.password;
+
+        res.status(201).json({
+            success: true,
+            message: 'User created successfully',
+            user: userResponse,
+            accessToken
+        });
+
     } catch (error) {
-        res.status(500)
-        console.log("error", error);
+        console.error('Signup error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
-}
+};
 
-export const signin = async (req, res)=> {
+export const signin = async (req, res) => {
     try {
-        const {email, password} = req.body
-        const user = await User.findOne({$or :[{email}, {password}]})
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({
+                success: false,
+                message: 'Email and password are required'
+            });
+        }
+
+        const user = await User.findOne({ email });
+
         if (!user) {
-           return res.status(404).json({message: "User not found"})
-        }  
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid email or password'
+            });
+        }
+
         if (user.isSuspended) {
-            return res.status(403).json({message: "user suspended"})
+            return res.status(403).json({
+                success: false,
+                message: 'Account suspended. Please contact support.'
+            });
         }
 
-        const comparePass = comparePasswords(password, user.password)
-        if (!comparePass) {
-            res.status(400).json({message: "Password is incorrect"})
+        const isPasswordValid = await comparePassword(password, user.password);
+
+        if (!isPasswordValid) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid email or password'
+            });
         }
 
-        const accessToken = generateToken(user._id, res)
-         res.status(200).json({message: "LOGIN SUCCESSFUL", accessToken})
-         console.log("Login successful" ,accessToken);
+        if (await needsRehash(user.password)) {
+            user.password = await hashPassword(password);
+            await user.save();
+        }
+
+        const accessToken = generateAccessToken(user._id);
+        const refreshToken = generateRefreshToken(user._id);
+
+        setAuthCookies(res, accessToken, refreshToken);
+
+        user.lastLogin = new Date();
+        await user.save();
+
+        const userResponse = user.toObject();
+        delete userResponse.password;
+
+        res.status(200).json({
+            success: true,
+            message: 'Login successful',
+            user: userResponse,
+            accessToken
+        });
+
     } catch (error) {
-        res.status(500)
-        console.log("error", error);
+        console.error('Signin error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
-}
+};
+
+export const refreshToken = async (req, res) => {
+    try {
+        const { refreshToken } = req.cookies;
+
+        if (!refreshToken) {
+            return res.status(401).json({
+                success: false,
+                message: 'Refresh token not found'
+            });
+        }
+
+        const decoded = verifyRefreshToken(refreshToken);
+
+        const user = await User.findById(decoded.userId);
+
+        if (!user || user.isSuspended) {
+            return res.status(401).json({
+                success: false,
+                message: 'User not found or suspended'
+            });
+        }
+
+        const newAccessToken = generateAccessToken(user._id);
+        const newRefreshToken = generateRefreshToken(user._id);
+
+        setAuthCookies(res, newAccessToken, newRefreshToken);
+
+        res.status(200).json({
+            success: true,
+            message: 'Token refreshed successfully',
+            accessToken: newAccessToken
+        });
+
+    } catch (error) {
+        console.error('Refresh token error:', error);
+        res.status(401).json({
+            success: false,
+            message: 'Invalid or expired refresh token'
+        });
+    }
+};
+
+
+export const logout = async (req, res) => {
+    try {
+        clearAuthCookies(res);
+        
+        res.status(200).json({
+            success: true,
+            message: 'Logout successful'
+        });
+    } catch (error) {
+        console.error('Logout error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Logout failed'
+        });
+    }
+};
