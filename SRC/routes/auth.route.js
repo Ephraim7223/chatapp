@@ -1,9 +1,19 @@
-import express from 'express'
-import { signin, signup } from '../controllers/auth.controller.js'
+import express from 'express';
+import { signup, signin, refreshToken, logout } from '../controllers/auth.controller.js';
+import { protectedRoute } from '../middlewares/jwt.js';
 
-const route = express.Router()
+const router = express.Router();
 
-route.post('/register', signup)
-route.post('/login', signin)
+router.post('/register', signup);
+router.post('/login', signin);
+router.post('/refresh', refreshToken);
+router.post('/logout', protectedRoute, logout);
 
-export default route
+router.get('/me', protectedRoute, (req, res) => {
+    res.json({
+        success: true,
+        user: req.user
+    });
+});
+
+export default router;
